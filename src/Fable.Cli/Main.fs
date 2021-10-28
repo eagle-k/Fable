@@ -288,21 +288,8 @@ type FsWatcher() =
         |> Observable.throttle 200.
         |> Observable.map caseInsensitiveSet
 
-// TODO: Check the path is actually normalized?
-type File(normalizedFullPath: string) =
-    let mutable sourceHash = None
-    member _.NormalizedFullPath = normalizedFullPath
-    member _.ReadSource() =
-        match sourceHash with
-        | Some h -> h, lazy File.readAllTextNonBlocking normalizedFullPath
-        | None ->
-            let source = File.readAllTextNonBlocking normalizedFullPath
-            let h = hash source
-            sourceHash <- Some h
-            h, lazy source
-
 type ProjectCracked(projFile: string,
-                    sourceFiles: File array,
+                    sourceFiles: string array,
                     fableCompilerOptions: CompilerOptions,
                     crackerResponse: CrackerResponse) =
 
@@ -315,9 +302,6 @@ type ProjectCracked(projFile: string,
     member _.MakeCompiler(currentFile, project, outDir) =
         let fableLibDir = Path.getRelativePath currentFile crackerResponse.FableLibDir
         CompilerImpl(currentFile, project, fableCompilerOptions, fableLibDir, ?outDir=outDir)
-
-    member _.MapSourceFiles(f) =
-        ProjectCracked(projFile, Array.map f sourceFiles, fableCompilerOptions, crackerResponse)
 
     static member Init(cliArgs: CliArgs) =
         let result, ms = measureTime <| fun () ->
@@ -339,7 +323,7 @@ type ProjectCracked(projFile: string,
             let opts = result.ProjectOptions.OtherOptions |> String.concat "\n   "
             $"F# PROJECT: %s{proj}\n   %s{opts}")
 
-        let sourceFiles = getSourceFiles result.ProjectOptions |> Array.map File
+        let sourceFiles = getSourceFiles result.ProjectOptions
         ProjectCracked(cliArgs.ProjectFile, sourceFiles, cliArgs.CompilerOptions, result)
 
 type ProjectChecked(project: Project, checker: FSharpChecker) =
@@ -355,11 +339,11 @@ type ProjectChecked(project: Project, checker: FSharpChecker) =
     member _.Project = project
     member _.Checker = checker
 
-    static member Init(config: ProjectCracked, ?checker) = async {
-        let checker =
-            match checker with
-            | Some checker -> checker
-            | None -> FSharpChecker.Create(keepAssemblyContents=true)
+    static member Init(config: ProjectCracked) = async {
+        let checker = FSharpChecker.Create(
+                        keepAssemblyContents=true,
+                        keepAllBackgroundResolutions=false,
+                        keepAllBackgroundSymbolUses=false)
 
         let! checkResults = checkProject config checker
         let proj = Project(config.ProjectFile,
@@ -370,6 +354,7 @@ type ProjectChecked(project: Project, checker: FSharpChecker) =
         return ProjectChecked(proj, checker)
     }
 
+    // TODO: Check if update can be faster by cheking only dirty files
     member this.Update(config: ProjectCracked) = async {
         let! checkResults = checkProject config this.Checker
         let proj = this.Project.Update(checkResults)
@@ -422,23 +407,17 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
             let fsprojChanged, oldFiles, projCracked =
                 if changes.Contains(state.CliArgs.ProjectFile)
                     // For performance reasons, don't crack .fsx scripts for every change
-                    && not(state.CliArgs.ProjectFile.EndsWith(".fsx")) then
-                    let oldFiles =
-                        projCracked.SourceFiles
-                        |> Array.map (fun f -> f.NormalizedFullPath)
-                        |> Set
-                    true, oldFiles, ProjectCracked.Init(state.CliArgs)
+                    && not(state.CliArgs.ProjectFile.EndsWith(".fsx"))
+                then true, Set projCracked.SourceFiles, ProjectCracked.Init(state.CliArgs)
                 else false, Set.empty, projCracked
 
             let dirtyFiles =
                 // If Fable compilation didn't happen yet (because of errors) just compile all files
                 if not state.HasCompiledOnce then
                     projCracked.SourceFiles
-                    |> Array.map (fun f -> f.NormalizedFullPath)
                 else
                     projCracked.SourceFiles
-                    |> Array.choose (fun file ->
-                        let path = file.NormalizedFullPath
+                    |> Array.choose (fun path ->
                         if changes.Contains(path)
                             || (fsprojChanged && not(Set.contains path oldFiles))
                             then Some path
@@ -448,17 +427,12 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
                 return projCracked, projChecked, [||]
             else
                 let dirtyFiles = set dirtyFiles
-                let projCracked = projCracked.MapSourceFiles(fun file ->
-                    if Set.contains file.NormalizedFullPath dirtyFiles then
-                        File(file.NormalizedFullPath) // Clear the cached source hash
-                    else file)
                 let! projChecked =
-                    if fsprojChanged then ProjectChecked.Init(projCracked, projChecked.Checker)
+                    if fsprojChanged then ProjectChecked.Init(projCracked)
                     else projChecked.Update(projCracked)
                 let filesToCompile =
                     projCracked.SourceFiles
-                    |> Array.choose (fun file ->
-                        let path = file.NormalizedFullPath
+                    |> Array.choose (fun path ->
                         if Set.contains path dirtyFiles
                             || hasWatchDependency path dirtyFiles state.WatchDependencies then Some path
                         else None)
@@ -467,21 +441,20 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
             let projCracked = ProjectCracked.Init(state.CliArgs)
             let! projChecked = ProjectChecked.Init(projCracked)
             let filesToCompile =
-                projCracked.SourceFiles
-                |> Array.map (fun f -> f.NormalizedFullPath)
-                |> fun files ->
-                    if Option.isNone state.Watcher || state.CliArgs.NoCache then files
-                    else
-                        // Skip files that have a more recent JS version
-                        let filesToCompile =
-                            files |> Array.skipWhile (fun file ->
-                                try
-                                    let jsFile = getOutJsPath state.CliArgs state.GetOrAddDeduplicateTargetDir file
-                                    IO.File.Exists(jsFile) && IO.File.GetLastWriteTime(jsFile) > IO.File.GetLastWriteTime(file)
-                                with _ -> false)
-                        if filesToCompile.Length < files.Length then
-                            Log.always("Skipping Fable compilation of up-to-date JS files")
-                        filesToCompile
+                if Option.isNone state.Watcher || state.CliArgs.NoCache
+                then projCracked.SourceFiles
+                else
+                    // Skip files that have a more recent JS version
+                    let filesToCompile =
+                        projCracked.SourceFiles
+                        |> Array.skipWhile (fun file ->
+                            try
+                                let jsFile = getOutJsPath state.CliArgs state.GetOrAddDeduplicateTargetDir file
+                                IO.File.Exists(jsFile) && IO.File.GetLastWriteTime(jsFile) > IO.File.GetLastWriteTime(file)
+                            with _ -> false)
+                    if filesToCompile.Length < projCracked.SourceFiles.Length then
+                        Log.always("Skipping Fable compilation of up-to-date JS files")
+                    filesToCompile
             return projCracked, projChecked, filesToCompile
         }
 
@@ -569,7 +542,7 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
                 match runProc.ExeFile with
                 | Naming.placeholder ->
                     let lastFile = Array.last projCracked.SourceFiles
-                    let lastFilePath = getOutJsPath state.CliArgs state.GetOrAddDeduplicateTargetDir lastFile.NormalizedFullPath
+                    let lastFilePath = getOutJsPath state.CliArgs state.GetOrAddDeduplicateTargetDir lastFile
                     // Fable's getRelativePath version ensures there's always a period in front of the path: ./
                     let lastFilePath = Path.getRelativeFileOrDirPath true workingDir false lastFilePath
                     "node", lastFilePath::runProc.Args
@@ -582,6 +555,8 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
                 let runProc = if runProc.IsWatch then Some runProc else None
                 None, { state with CliArgs = { state.CliArgs with RunProcess = runProc } }
             else
+                // TODO: When not in watch mode, we should run the process out of this scope
+                // to free the memory used by Fable/F# compiler
                 let exitCode = Process.runSync workingDir exeFile args
                 (if exitCode = 0 then None else Some "Run process failed"), state
 
@@ -595,8 +570,7 @@ let rec startCompilation (changes: ISet<string>) (state: State) = async {
             watcher.Observe [
                 projCracked.ProjectOptions.ProjectFileName
                 yield! projCracked.SourceFiles
-                    |> Array.choose (fun f ->
-                        let path = f.NormalizedFullPath
+                    |> Array.choose (fun path ->
                         if Naming.isInFableHiddenDir(path) then None
                         else Some path)
             ]
