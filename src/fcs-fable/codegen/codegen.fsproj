@@ -46,7 +46,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="FSharp.Core" Version="5.0.1" />
+    <PackageReference Include="FSharp.Core" Version="6.0.0" />
   </ItemGroup>
 
   <Target Name="GenerateCode" AfterTargets="Restore" BeforeTargets="BeforeBuild" DependsOnTargets="CallFsLex;CallFsYacc"></Target>

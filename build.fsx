@@ -400,7 +400,8 @@ let test() =
 
     testDefineConstants()
 
-    testCompiler()
+    // TODO: fcs-fable needs to be updated
+    // testCompiler()
 
     testIntegration()
 

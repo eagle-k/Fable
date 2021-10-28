@@ -13,7 +13,7 @@
     <Compile Include="InjectProcessor.fs" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="FSharp.Core" Version="5.0.1" />
+    <PackageReference Include="FSharp.Core" Version="6.0.0" />
     <PackageReference Include="Dotnet.ProjInfo" Version="0.44.0" />
     <!-- <PackageReference Include="FSharp.Compiler.Service" Version="35.0.0" /> -->
     <Reference Include="../../../lib/fcs/FSharp.Compiler.Service.dll" />
