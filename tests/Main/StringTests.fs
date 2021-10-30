@@ -550,6 +550,34 @@ let tests =
             "a;,b,c;d".Split([|','; ';'|], 3, StringSplitOptions.RemoveEmptyEntries)
             |> (=) [|"a";"b";"c;d"|] |> equal true
 
+      testCase "String.Split more tests" <| fun () ->
+          let M = System.Int32.MaxValue
+          [| "a-b-c", null, M, StringSplitOptions.None, [|"a-b-c"|]
+             "a-b-c", "", M, StringSplitOptions.None, [|"a-b-c"|]
+             "---o---o---", "--", M, StringSplitOptions.None, [|""; "-o"; "-o"; "-"|]
+             "---o---o---", "--", M, StringSplitOptions.RemoveEmptyEntries, [|"-o"; "-o"; "-"|]
+             " a-- b- c ", "-", 2, StringSplitOptions.None, [|" a"; "- b- c "|]
+             " a-- b- c ", "-", 2, StringSplitOptions.RemoveEmptyEntries, [|" a"; " b- c "|]
+             " a-- b- c ", "-", 2, StringSplitOptions.TrimEntries, [|"a"; "- b- c"|]
+             " a-- b- c ", "-", 2, StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries, [|"a"; "b- c"|]
+             " a-- b- c ", "-", 3, StringSplitOptions.None, [|" a"; ""; " b- c "|]
+             " a-- b- c ", "-", 3, StringSplitOptions.RemoveEmptyEntries, [|" a"; " b"; " c "|]
+             " a-- b- c ", "-", 3, StringSplitOptions.TrimEntries, [|"a"; ""; "b- c"|]
+             " a-- b- c ", "-", 3, StringSplitOptions.RemoveEmptyEntries ||| StringSplitOptions.TrimEntries, [|"a"; "b"; "c"|]
+          |]
+          |> Array.iter (
+              fun (value, separator, count, options, expected) ->
+                  value.Split(separator, count, options) |> equal expected
+                  value.Split([|separator|], count, options) |> equal expected
+                  if count = M then
+                      value.Split(separator, options) |> equal expected
+                      value.Split([|separator|], options) |> equal expected
+                  if options = StringSplitOptions.None then
+                      value.Split(separator, count) |> equal expected
+                  if (count = M && options = StringSplitOptions.None) then
+                      value.Split(separator) |> equal expected
+          )
+
       testCase "String.Replace works" <| fun () ->
             "abc abc abc".Replace("abc", "d") |> equal "d d d"
             // String.Replace does not get stuck in endless loop
